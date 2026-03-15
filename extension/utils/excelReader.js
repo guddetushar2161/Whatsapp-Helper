@@ -1,5 +1,5 @@
 /**
- * Excel/CSV file reader and parser using SheetJS (XLSX global loaded via CDN)
+ * Excel/CSV file reader and parser using SheetJS (XLSX global loaded from local lib/xlsx.full.min.js)
  */
 import { parsePhoneNumber, deduplicateContacts } from "./parser.js";
 
@@ -95,7 +95,7 @@ function detectColumns(rows, hasHeaders) {
 export function readFile(file, defaultCountryCode = "91") {
   return new Promise((resolve, reject) => {
     if (typeof XLSX === "undefined") {
-      reject(new Error("SheetJS (XLSX) library not loaded. Please check the CDN link in popup.html."));
+      reject(new Error("SheetJS (XLSX) library not loaded. Please ensure lib/xlsx.full.min.js is present (see lib/README.md)."));
       return;
     }
 

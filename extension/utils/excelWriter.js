@@ -1,5 +1,5 @@
 /**
- * Export contacts to XLSX or CSV using SheetJS (XLSX global loaded via CDN)
+ * Export contacts to XLSX or CSV using SheetJS (XLSX global loaded from local lib/xlsx.full.min.js)
  */
 
 /**
