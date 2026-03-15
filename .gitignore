@@ -1,0 +1,14 @@
+# SheetJS — must be downloaded locally (see extension/lib/README.md)
+extension/lib/xlsx.full.min.js
+
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Node (if ever used for tooling)
+node_modules/
+dist/

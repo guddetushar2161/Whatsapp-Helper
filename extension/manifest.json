@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "WhatsApp Bulk Messenger",
+  "version": "1.0.0",
+  "description": "Send personalized WhatsApp messages to multiple contacts safely using wa.me links",
+  "permissions": ["tabs", "storage", "scripting", "activeTab"],
+  "host_permissions": ["https://wa.me/*", "https://web.whatsapp.com/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "WhatsApp Bulk Messenger"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}

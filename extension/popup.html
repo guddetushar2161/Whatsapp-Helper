@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhatsApp Bulk Messenger</title>
+  <link rel="stylesheet" href="styles/popup.css" />
+  <!-- SheetJS for Excel/CSV parsing and export.
+       MV3 extensions cannot load remote scripts. Download xlsx.full.min.js
+       from https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+       and place it in the lib/ directory (see lib/README.md). -->
+  <script src="lib/xlsx.full.min.js"></script>
+</head>
+<body>
+<div id="app">
+
+  <!-- ══ SIDEBAR ══════════════════════════════════════════════ -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="12" fill="#25D366"/>
+          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z" fill="white"/>
+        </svg>
+        <span class="sidebar-logo-text">WhatsApp<br>Bulk Sender</span>
+      </div>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-item active" data-section="step1">
+        <span class="nav-icon">📋</span>
+        <span class="nav-label">Add Contacts</span>
+      </div>
+      <div class="nav-item" data-section="step2">
+        <span class="nav-icon">✏️</span>
+        <span class="nav-label">Write Message</span>
+      </div>
+      <div class="nav-item" data-section="step3">
+        <span class="nav-icon">🚀</span>
+        <span class="nav-label">Configure &amp; Send</span>
+      </div>
+      <div class="nav-item" data-section="step4">
+        <span class="nav-icon">📊</span>
+        <span class="nav-label">View Report</span>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- ══ MAIN ═════════════════════════════════════════════════ -->
+  <main id="main">
+
+    <!-- ── STEP 1: Add Contacts ─────────────────────────────── -->
+    <section id="step1" class="section active">
+      <div class="section-header">
+        <div class="section-title">Add Contacts</div>
+        <div class="section-subtitle">Paste numbers or upload an Excel / CSV file</div>
+      </div>
+      <div class="section-body">
+
+        <!-- Paste numbers -->
+        <div class="card">
+          <div class="card-title">Paste Phone Numbers</div>
+          <textarea id="numberInput" rows="5"
+            placeholder="One number per line or comma-separated&#10;+91 98765 43210&#10;+1-800-555-0199&#10;9876543210, 8765432109"></textarea>
+          <div class="input-row" style="margin-top:8px;">
+            <div>
+              <label for="defaultCountryCode">Default Country Code</label>
+              <select id="defaultCountryCode">
+                <option value="91" selected>🇮🇳 +91 India</option>
+                <option value="1">🇺🇸 +1 USA/Canada</option>
+                <option value="44">🇬🇧 +44 UK</option>
+                <option value="61">🇦🇺 +61 Australia</option>
+                <option value="971">🇦🇪 +971 UAE</option>
+                <option value="966">🇸🇦 +966 Saudi Arabia</option>
+                <option value="65">🇸🇬 +65 Singapore</option>
+                <option value="60">🇲🇾 +60 Malaysia</option>
+                <option value="27">🇿🇦 +27 South Africa</option>
+                <option value="55">🇧🇷 +55 Brazil</option>
+                <option value="49">🇩🇪 +49 Germany</option>
+                <option value="33">🇫🇷 +33 France</option>
+                <option value="39">🇮🇹 +39 Italy</option>
+                <option value="34">🇪🇸 +34 Spain</option>
+                <option value="81">🇯🇵 +81 Japan</option>
+                <option value="86">🇨🇳 +86 China</option>
+                <option value="92">🇵🇰 +92 Pakistan</option>
+                <option value="880">🇧🇩 +880 Bangladesh</option>
+                <option value="94">🇱🇰 +94 Sri Lanka</option>
+                <option value="977">🇳🇵 +977 Nepal</option>
+              </select>
+            </div>
+            <div style="display:flex;align-items:flex-end;">
+              <button id="processBtn" class="btn btn-primary btn-full">
+                ✅ Process Numbers
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- File upload -->
+        <div class="card">
+          <div class="card-title">Upload Excel / CSV</div>
+          <div id="dropZone">
+            <div class="drop-icon">📂</div>
+            <div class="drop-text">Drag &amp; drop file here or click to browse</div>
+            <div class="drop-hint">Supports .xlsx, .xls, .csv — auto-detects Name &amp; Phone columns</div>
+          </div>
+          <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none;" />
+        </div>
+
+        <!-- Stats -->
+        <div id="statsDisplay">
+          <div class="stat-chip">
+            <div class="stat-chip-value" id="statChipValid">0</div>
+            <div class="stat-chip-label">Valid</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-value" id="statChipInvalid">0</div>
+            <div class="stat-chip-label">Invalid</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-value" id="statChipDupes">0</div>
+            <div class="stat-chip-label">Dupes Removed</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-value" id="statChipTotal">0</div>
+            <div class="stat-chip-label">Total</div>
+          </div>
+        </div>
+
+        <!-- Invalid numbers -->
+        <div id="invalidListWrapper" style="display:none;">
+          <div class="card-title" style="font-size:11px;color:#e53935;margin-bottom:6px;">⚠️ Invalid Numbers</div>
+          <div id="invalidList"></div>
+        </div>
+
+        <!-- Contacts table -->
+        <div id="contactsTableWrapper" style="display:none;">
+          <div class="card-title" style="margin-bottom:6px;">Contacts Preview</div>
+          <div class="table-wrapper">
+            <table id="contactsTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Name</th>
+                  <th>Phone</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="contactsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── STEP 2: Write Message ─────────────────────────────── -->
+    <section id="step2" class="section">
+      <div class="section-header">
+        <div class="section-title">Write Message</div>
+        <div class="section-subtitle">Use <code>{Name}</code> to personalise each message</div>
+      </div>
+      <div class="section-body">
+
+        <div class="card">
+          <div class="card-title">Message</div>
+          <textarea id="messageInput" rows="6"
+            placeholder="Hi {Name}! 👋&#10;&#10;I wanted to reach out to you about..."></textarea>
+          <div id="charCount">0 / 4096 characters</div>
+          <div class="alert alert-info" style="margin-top:8px;font-size:11.5px;">
+            💡 Use <strong>{Name}</strong> to insert the contact's name. If no name is available, "Friend" will be used.
+          </div>
+        </div>
+
+        <!-- Live preview -->
+        <div class="card">
+          <div class="preview-label">📱 Preview (first contact)</div>
+          <div id="messagePreview"><em style="opacity:0.5">Your message preview will appear here…</em></div>
+        </div>
+
+        <!-- Templates -->
+        <div class="card">
+          <div class="card-title">Templates</div>
+          <div class="input-row" style="margin-bottom:8px;">
+            <input type="text" id="templateName" placeholder="Template name…" />
+            <button id="saveTemplateBtn" class="btn btn-secondary btn-sm" style="white-space:nowrap;">
+              💾 Save
+            </button>
+          </div>
+          <div id="templateList">
+            <div class="empty-state">No templates saved yet.</div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── STEP 3: Configure & Send ──────────────────────────── -->
+    <section id="step3" class="section">
+      <div class="section-header">
+        <div class="section-title">Configure &amp; Send</div>
+        <div class="section-subtitle">Set delays to avoid being flagged as spam</div>
+      </div>
+      <div class="section-body">
+
+        <div class="card">
+          <div class="card-title">Delay Settings</div>
+          <div class="input-row">
+            <div>
+              <label for="minDelay">Min delay (sec)</label>
+              <input type="number" id="minDelay" value="15" min="5" max="300" />
+            </div>
+            <div>
+              <label for="maxDelay">Max delay (sec)</label>
+              <input type="number" id="maxDelay" value="45" min="5" max="600" />
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Extended Pause</div>
+          <div class="input-row">
+            <div>
+              <label for="pauseEvery">Pause every N messages</label>
+              <input type="number" id="pauseEvery" value="20" min="1" max="200" />
+            </div>
+            <div>
+              <label for="pauseDuration">Pause duration (sec)</label>
+              <input type="number" id="pauseDuration" value="120" min="30" max="3600" />
+            </div>
+          </div>
+        </div>
+
+        <div id="batchWarning">
+          ⚠️ <span>You have more than 50 contacts. WhatsApp may flag bulk activity. Consider splitting into smaller batches and using longer delays.</span>
+        </div>
+
+        <!-- Control buttons -->
+        <div class="btn-row">
+          <button id="startBtn" class="btn btn-primary">▶ Start Sending</button>
+          <button id="pauseBtn" class="btn btn-warning" style="display:none;">⏸ Pause</button>
+          <button id="resumeBtn" class="btn btn-secondary" style="display:none;">▶ Resume</button>
+          <button id="stopBtn" class="btn btn-danger" style="display:none;">⏹ Stop</button>
+        </div>
+
+        <div id="pauseNotice">⏳ <span id="pauseNoticeText">Extended pause in progress…</span></div>
+
+        <!-- Progress -->
+        <div class="progress-container">
+          <div id="progressBar"><div class="progress-fill"></div></div>
+          <div id="progressText">Ready to send</div>
+        </div>
+
+        <!-- Live status -->
+        <div class="card">
+          <div class="card-title">Live Status</div>
+          <div id="liveStatusList">
+            <div class="empty-state">Queue has not started.</div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── STEP 4: View Report ────────────────────────────────── -->
+    <section id="step4" class="section">
+      <div class="section-header">
+        <div class="section-title">View Report</div>
+        <div class="section-subtitle">Full send history and export</div>
+      </div>
+      <div class="section-body">
+
+        <div class="report-stats">
+          <div class="report-stat">
+            <div class="report-stat-value" id="statTotal">0</div>
+            <div class="report-stat-label">Total</div>
+          </div>
+          <div class="report-stat">
+            <div class="report-stat-value" id="statValid">0</div>
+            <div class="report-stat-label">Valid</div>
+          </div>
+          <div class="report-stat">
+            <div class="report-stat-value" id="statDuplicates">0</div>
+            <div class="report-stat-label">Duplicates</div>
+          </div>
+          <div class="report-stat">
+            <div class="report-stat-value" id="statInvalid">0</div>
+            <div class="report-stat-label">Invalid</div>
+          </div>
+          <div class="report-stat">
+            <div class="report-stat-value" id="statSent">0</div>
+            <div class="report-stat-label">Sent</div>
+          </div>
+          <div class="report-stat">
+            <div class="report-stat-value" id="statFailed">0</div>
+            <div class="report-stat-label">Failed</div>
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button id="exportXlsxBtn" class="btn btn-secondary">📥 Export XLSX</button>
+          <button id="exportCsvBtn" class="btn btn-secondary">📥 Export CSV</button>
+        </div>
+
+        <div id="reportTableWrapper">
+          <div class="table-wrapper">
+            <table id="reportTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Name</th>
+                  <th>Phone</th>
+                  <th>Status</th>
+                  <th>Timestamp</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody id="reportTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script type="module" src="popup.js"></script>
+</body>
+</html>
