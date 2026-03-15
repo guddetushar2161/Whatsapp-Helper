@@ -212,7 +212,6 @@ function updateCharCount() {
   const el = $("charCount");
   el.textContent = `${len} / 4096 characters`;
   el.className = "";
-  // Warn at ~25% of the 4096 limit (soft), hard-warn at ~37% to nudge users toward concise messages
   if (len >= 1500) el.classList.add("danger");
   else if (len >= 1000) el.classList.add("warn");
 }
@@ -226,8 +225,8 @@ function updateMessagePreview() {
     return;
   }
 
-  const firstName = contacts.length > 0 && contacts[0].name ? contacts[0].name : "Friend";
-  const rendered = template.replace(/\{Name\}/gi, firstName);
+  const contactName = contacts.length > 0 && contacts[0].name ? contacts[0].name : "Friend";
+  const rendered = template.replace(/\{Name\}/gi, contactName);
   previewEl.textContent = rendered;
 }
 

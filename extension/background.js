@@ -157,7 +157,7 @@ async function runQueue() {
     broadcastStatus();
 
     // Send
-    const result = await sendToContact(contact, contactIndex);
+    const result = await sendToContact(contact);
 
     // Close the tab
     await closeActiveTab();
