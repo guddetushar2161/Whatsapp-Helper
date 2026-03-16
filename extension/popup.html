@@ -171,6 +171,19 @@
           </div>
         </div>
 
+        <div class="card">
+          <div class="card-title">Optional Image Attachment</div>
+          <input type="file" id="imageInput" accept="image/*" style="display:none;" />
+          <div class="btn-row" style="margin-bottom:8px;">
+            <button id="pickImageBtn" class="btn btn-secondary">🖼 Select Image</button>
+            <button id="clearImageBtn" class="btn btn-danger" style="display:none;">✖ Remove</button>
+          </div>
+          <div id="imageMeta" class="media-meta">No image selected. Text-only mode.</div>
+          <div class="alert alert-info" style="margin-top:8px;font-size:11.5px;">
+            If selected, the extension sends the image first and then sends your text message.
+          </div>
+        </div>
+
         <!-- Live preview -->
         <div class="card">
           <div class="preview-label">📱 Preview (first contact)</div>

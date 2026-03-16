@@ -12,6 +12,8 @@ let contacts = [];         // Array<{name, phone, status, timestamp, notes}>
 let invalidContacts = [];  // Array<{phone, reason}>
 let duplicatesRemoved = 0;
 let totalRawCount = 0;
+let optionalImage = null;  // {name, type, size, dataUrl} | null
+const IMAGE_MODE_ENABLED = false;
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 
@@ -35,6 +37,18 @@ function formatTimestamp(iso) {
   } catch (_) {
     return iso;
   }
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx++;
+  }
+  return `${value.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -293,7 +307,132 @@ function initStep2() {
     renderTemplateList();
   });
 
+  initImageAttachment();
   renderTemplateList();
+}
+
+function updateImageMeta() {
+  const meta = $("imageMeta");
+  const clearBtn = $("clearImageBtn");
+  if (!IMAGE_MODE_ENABLED) {
+    optionalImage = null;
+    meta.textContent = "Image mode is temporarily disabled for stability. Text-only mode is active.";
+    clearBtn.style.display = "none";
+    return;
+  }
+  if (!optionalImage) {
+    meta.textContent = "No image selected. Text-only mode. (Tip: paste an image into the message box to attach it.)";
+    clearBtn.style.display = "none";
+    return;
+  }
+  meta.textContent = `Selected: ${optionalImage.name} (${formatBytes(optionalImage.size)})`;
+  clearBtn.style.display = "inline-flex";
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Failed to read image file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function initImageAttachment() {
+  const imageInput = $("imageInput");
+  const pickBtn = $("pickImageBtn");
+  const clearBtn = $("clearImageBtn");
+  const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
+
+  if (!IMAGE_MODE_ENABLED) {
+    optionalImage = null;
+    imageInput.value = "";
+    pickBtn.disabled = true;
+    pickBtn.title = "Image sending is temporarily disabled";
+    clearBtn.style.display = "none";
+    updateImageMeta();
+    return;
+  }
+
+  pickBtn.addEventListener("click", () => imageInput.click());
+
+  clearBtn.addEventListener("click", () => {
+    optionalImage = null;
+    imageInput.value = "";
+    updateImageMeta();
+  });
+
+  imageInput.addEventListener("change", async () => {
+    const file = imageInput.files && imageInput.files[0];
+    if (!file) return;
+
+    if (!file.type || !file.type.startsWith("image/")) {
+      alert("Please select a valid image file.");
+      imageInput.value = "";
+      return;
+    }
+
+    if (file.size > MAX_IMAGE_SIZE) {
+      alert("Image is too large. Please select an image up to 5 MB.");
+      imageInput.value = "";
+      return;
+    }
+
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      optionalImage = {
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        dataUrl,
+      };
+      updateImageMeta();
+    } catch (err) {
+      optionalImage = null;
+      imageInput.value = "";
+      alert(`Failed to read image: ${err.message}`);
+      updateImageMeta();
+    }
+  });
+
+  // Paste-to-attach: intercept image paste in the message textarea
+  const messageInput = $("messageInput");
+  messageInput.addEventListener("paste", async (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+
+    let imageFile = null;
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        imageFile = item.getAsFile();
+        break;
+      }
+    }
+
+    if (!imageFile) return; // no image in clipboard — let normal text paste proceed
+
+    e.preventDefault(); // prevent browser from inserting broken image markup
+
+    if (imageFile.size > MAX_IMAGE_SIZE) {
+      alert("Pasted image is too large. Please use an image up to 5 MB.");
+      return;
+    }
+
+    try {
+      const dataUrl = await fileToDataUrl(imageFile);
+      optionalImage = {
+        name: imageFile.name || "pasted-image.png",
+        type: imageFile.type || "image/png",
+        size: imageFile.size,
+        dataUrl,
+      };
+      updateImageMeta();
+    } catch (err) {
+      alert(`Failed to read pasted image: ${err.message}`);
+    }
+  });
+
+  updateImageMeta();
 }
 
 // ── Step 3: Configure & Send ──────────────────────────────────────────────────
@@ -393,12 +532,18 @@ function initStep3() {
     await saveSettings(settings);
 
     try {
-      await chrome.runtime.sendMessage({
+      const response = await chrome.runtime.sendMessage({
         type: "START_QUEUE",
         contacts,
         messageTemplate: message,
+        imageAttachment: null,
         ...settings,
       });
+
+      if (!response || !response.ok) {
+        throw new Error((response && response.error) || "Could not start queue.");
+      }
+
       setQueueButtons("running");
     } catch (err) {
       alert(`Failed to start queue: ${err.message}`);
