@@ -243,7 +243,7 @@ async function openWhatsAppWebTabWithRetry(url, maxRetries = MAX_WEB_OPEN_RETRIE
 
 async function sendToContact(contact) {
   const message = buildMessage(messageTemplate, contact);
-  const hasImage = false;
+  const hasImage = !!(imageAttachment && imageAttachment.dataUrl);
   const phone = contact.phone.replace(/^\+/, "");
   const params = new URLSearchParams({
     phone,
@@ -426,7 +426,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           queue.currentIndex = 0;
           queue.status = "running";
           messageTemplate = message.messageTemplate || "";
-          imageAttachment = null;
+          imageAttachment = message.imageAttachment || null;
           settings = normalizeSettings(message);
           processedSinceLastPause = 0;
           broadcastStatus();

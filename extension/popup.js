@@ -13,7 +13,8 @@ let invalidContacts = [];  // Array<{phone, reason}>
 let duplicatesRemoved = 0;
 let totalRawCount = 0;
 let optionalImage = null;  // {name, type, size, dataUrl} | null
-const IMAGE_MODE_ENABLED = false;
+let imagePreviewEl = null; // cached <img id="imagePreview"> element
+const IMAGE_MODE_ENABLED = true;
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 
@@ -318,15 +319,22 @@ function updateImageMeta() {
     optionalImage = null;
     meta.textContent = "Image mode is temporarily disabled for stability. Text-only mode is active.";
     clearBtn.style.display = "none";
+    if (imagePreviewEl) imagePreviewEl.style.display = "none";
     return;
   }
   if (!optionalImage) {
     meta.textContent = "No image selected. Text-only mode. (Tip: paste an image into the message box to attach it.)";
     clearBtn.style.display = "none";
+    if (imagePreviewEl) imagePreviewEl.style.display = "none";
     return;
   }
   meta.textContent = `Selected: ${optionalImage.name} (${formatBytes(optionalImage.size)})`;
   clearBtn.style.display = "inline-flex";
+  if (imagePreviewEl) {
+    imagePreviewEl.src = optionalImage.dataUrl;
+    imagePreviewEl.alt = optionalImage.name;
+    imagePreviewEl.style.display = "block";
+  }
 }
 
 function fileToDataUrl(file) {
@@ -343,6 +351,9 @@ function initImageAttachment() {
   const pickBtn = $("pickImageBtn");
   const clearBtn = $("clearImageBtn");
   const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
+
+  // Cache the preview element once the DOM is ready
+  imagePreviewEl = $("imagePreview");
 
   if (!IMAGE_MODE_ENABLED) {
     optionalImage = null;
@@ -536,7 +547,7 @@ function initStep3() {
         type: "START_QUEUE",
         contacts,
         messageTemplate: message,
-        imageAttachment: null,
+        imageAttachment: optionalImage || null,
         ...settings,
       });
 

@@ -367,6 +367,17 @@ textarea {
   word-break: break-word;
 }
 
+/* ── Image attachment preview ────────────────────────────── */
+#imagePreview {
+  display: none;
+  max-width: 100%;
+  max-height: 180px;
+  border-radius: var(--radius-md);
+  margin-bottom: 8px;
+  object-fit: contain;
+  border: 1px solid var(--color-border);
+}
+
 /* ── Stats display ───────────────────────────────────────── */
 #statsDisplay {
   display: none;
