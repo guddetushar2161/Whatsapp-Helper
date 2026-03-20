@@ -1,6 +1,6 @@
 /**
  * Content script — injected into https://web.whatsapp.com/*
- * Handles text-only send and optional image-then-text send workflows.
+ * Handles text-only send workflow.
  */
 
 (function () {
@@ -14,38 +14,16 @@
     'button[data-testid="compose-btn-send"]',
   ];
 
-  const ATTACH_BUTTON_SELECTORS = [
-    '[data-testid="clip"]',
-    'span[data-icon="attach-menu-plus"]',
-    'span[data-icon="plus"]',
-    '[aria-label="Attach"]',
-    '[data-testid="attach-media"]',
-    'button[title="Attach"]',
-    'div[title="Attach"]',
-  ];
-
   const CHAT_INPUT_SELECTORS = [
     'footer [contenteditable="true"][role="textbox"]',
     '[data-testid="conversation-compose-box-input"]',
     'div[contenteditable="true"][role="textbox"]',
   ];
 
-  const MEDIA_CAPTION_INPUT_SELECTORS = [
-    '[data-testid="media-caption-input-container"] [contenteditable="true"][role="textbox"]',
-    '[data-testid="media-caption-input"] [contenteditable="true"][role="textbox"]',
-    '[data-testid="media-compose"] [contenteditable="true"][role="textbox"]',
-    'div[contenteditable="true"][data-tab="1"]',
-  ];
+  // Generous timeout — valid WhatsApp numbers may load slowly on some networks.
+  // Non-WhatsApp numbers are detected instantly via MutationObserver (no polling).
+  const WAIT_TIMEOUT_MS = 15000;
 
-  const MEDIA_SEND_BUTTON_SELECTORS = [
-    '[data-testid="media-caption-send-button"]',
-    '[data-testid="media-send"]',
-    'button[aria-label="Send"]',
-    'span[data-testid="send"]',
-  ];
-
-  const WAIT_TIMEOUT_MS = 20000;
-  const MEDIA_RENDER_WAIT_MS = 1200;
   const UNAVAILABLE_PATTERNS = [
     "phone number shared via url is invalid",
     "phone number isn't on whatsapp",
@@ -81,14 +59,6 @@
     return null;
   }
 
-  function findAttachButton() {
-    for (const sel of ATTACH_BUTTON_SELECTORS) {
-      const el = document.querySelector(sel);
-      if (el) return el;
-    }
-    return null;
-  }
-
   function findChatInput() {
     for (const sel of CHAT_INPUT_SELECTORS) {
       const el = document.querySelector(sel);
@@ -97,31 +67,20 @@
     return null;
   }
 
-  function isVisible(el) {
-    return !!(el && el.isConnected && el.getClientRects && el.getClientRects().length > 0);
-  }
-
-  function findMediaCaptionInput() {
-    for (const sel of MEDIA_CAPTION_INPUT_SELECTORS) {
-      const matches = Array.from(document.querySelectorAll(sel));
-      const visible = matches.find(isVisible);
-      if (visible) return visible;
-    }
-    return null;
-  }
-
-  function findMediaSendButton() {
-    for (const sel of MEDIA_SEND_BUTTON_SELECTORS) {
-      const matches = Array.from(document.querySelectorAll(sel));
-      const visible = matches.find(isVisible);
-      if (visible) return visible;
-    }
-    return null;
-  }
-
   function isUnavailableNumberVisible() {
-    const text = (document.body && document.body.innerText ? document.body.innerText : "").toLowerCase();
-    return UNAVAILABLE_PATTERNS.some((pattern) => text.includes(pattern));
+    // Check specific dialog / alert containers first — much faster than scanning the entire body.
+    const containers = document.querySelectorAll(
+      '[data-testid="alert-popup"], [data-testid="confirm-popup"], [role="alertdialog"], [role="dialog"], [role="alert"]'
+    );
+
+    for (const el of containers) {
+      const text = (el.innerText || el.textContent || "").toLowerCase();
+      if (UNAVAILABLE_PATTERNS.some((p) => text.includes(p))) return true;
+    }
+
+    // Fallback: full body scan (handles inline error messages outside dialogs)
+    const body = document.body ? document.body.innerText : "";
+    return UNAVAILABLE_PATTERNS.some((p) => body.toLowerCase().includes(p));
   }
 
   // Automatically click the OK button on the "isn't on WhatsApp" modal so it
@@ -139,241 +98,70 @@
     }
     if (okBtn) {
       okBtn.click();
-      await sleep(400);
+      await sleep(300);
     }
   }
 
-  function waitForElement(findFn, notFoundMessage, timeoutMs = WAIT_TIMEOUT_MS) {
+  /**
+   * Wait for either the chat compose box to appear OR an "unavailable" modal.
+   * Uses MutationObserver — zero polling, resolves/rejects the instant the DOM changes.
+   * For valid WhatsApp numbers the input typically appears in 2-5 s.
+   * For non-WhatsApp numbers the error modal is detected within one DOM mutation tick.
+   */
+  function waitForChatOrUnavailable(timeoutMs = WAIT_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
-      const immediate = findFn();
-      if (immediate) {
-        resolve(immediate);
+      // Immediate check before attaching observer (handles pre-loaded pages)
+      if (isUnavailableNumberVisible()) {
+        dismissUnavailablePopup().catch(() => {});
+        reject(new Error("Number unavailable: contact is not on WhatsApp"));
+        return;
+      }
+      if (findChatInput() || findSendButton()) {
+        resolve();
         return;
       }
 
+      let settled = false;
+
+      function finish(err) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(tid);
+        observer.disconnect();
+        if (err) reject(err);
+        else resolve();
+      }
+
       const observer = new MutationObserver(() => {
-        const element = findFn();
-        if (element) {
-          observer.disconnect();
-          clearTimeout(timeoutId);
-          resolve(element);
+        if (settled) return;
+        if (isUnavailableNumberVisible()) {
+          dismissUnavailablePopup().catch(() => {});
+          finish(new Error("Number unavailable: contact is not on WhatsApp"));
+          return;
+        }
+        if (findChatInput() || findSendButton()) {
+          finish();
         }
       });
 
       observer.observe(document.body, { childList: true, subtree: true });
 
-      const timeoutId = setTimeout(() => {
-        observer.disconnect();
-        reject(new Error(notFoundMessage));
-      }, timeoutMs);
-    });
-  }
-
-  function waitForSendButton(timeoutMs = WAIT_TIMEOUT_MS) {
-    return new Promise((resolve, reject) => {
-      const immediate = findSendButton();
-      if (immediate) {
-        resolve(immediate);
-        return;
-      }
-
-      const targetNode = document.body;
-      const observer = new MutationObserver(() => {
-        const btn = findSendButton();
-        if (btn) {
-          observer.disconnect();
-          clearTimeout(timeoutId);
-          resolve(btn);
-        }
-      });
-
-      observer.observe(targetNode, { childList: true, subtree: true });
-
-      const timeoutId = setTimeout(() => {
-        observer.disconnect();
-        reject(new Error("Send button did not appear in time"));
-      }, timeoutMs);
+      const tid = setTimeout(
+        () => finish(new Error("Chat did not become ready in time")),
+        timeoutMs
+      );
     });
   }
 
   async function clickSendButton() {
-    const btn = await waitForSendButton();
+    // The paper-plane send button may take a frame or two to appear after text is inserted.
+    let btn = findSendButton();
+    if (!btn) {
+      await sleep(300);
+      btn = findSendButton();
+    }
+    if (!btn) throw new Error("Send button not found after chat was ready");
     btn.click();
-  }
-
-  async function waitForChatReadyOrUnavailable(timeoutMs = WAIT_TIMEOUT_MS) {
-    const started = Date.now();
-    // After the chat UI loads, keep polling for a short grace window so that
-    // a deferred "isn't on WhatsApp" modal (which appears ~1-2s after load) is
-    // caught before we attempt to send.
-    const GRACE_MS = 1500;
-    let chatReadyAt = null;
-
-    while (Date.now() - started < timeoutMs) {
-      if (isUnavailableNumberVisible()) {
-        await dismissUnavailablePopup();
-        throw new Error("Number unavailable: contact is not on WhatsApp");
-      }
-
-      const isReady = !!(findChatInput() || findSendButton() || findAttachButton());
-      if (isReady) {
-        if (!chatReadyAt) chatReadyAt = Date.now();
-        // Only proceed once the grace period has elapsed without a modal appearing
-        if (Date.now() - chatReadyAt >= GRACE_MS) {
-          return;
-        }
-      }
-
-      await sleep(150);
-    }
-
-    throw new Error("Chat did not become ready in time");
-  }
-
-  function waitForImageFileInput(timeoutMs = WAIT_TIMEOUT_MS) {
-    return new Promise((resolve, reject) => {
-      const findInput = () => {
-        const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
-        return inputs.find((input) => (input.accept || "").toLowerCase().includes("image")) || null;
-      };
-
-      const immediate = findInput();
-      if (immediate) {
-        resolve(immediate);
-        return;
-      }
-
-      const observer = new MutationObserver(() => {
-        const input = findInput();
-        if (input) {
-          observer.disconnect();
-          clearTimeout(timeoutId);
-          resolve(input);
-        }
-      });
-
-      observer.observe(document.body, { childList: true, subtree: true });
-
-      const timeoutId = setTimeout(() => {
-        observer.disconnect();
-        reject(new Error("Image picker input did not appear in time"));
-      }, timeoutMs);
-    });
-  }
-
-  async function waitForMediaComposerReady(timeoutMs = WAIT_TIMEOUT_MS) {
-    const started = Date.now();
-    while (Date.now() - started < timeoutMs) {
-      const caption = findMediaCaptionInput();
-      const sendBtn = findMediaSendButton();
-      if (caption && sendBtn) {
-        return { caption, sendBtn };
-      }
-      await sleep(120);
-    }
-    throw new Error("Media composer did not become ready in time");
-  }
-
-  async function sendMediaWithCaption(captionText) {
-    const { caption, sendBtn } = await waitForMediaComposerReady();
-    const trimmed = (captionText || "").trim();
-
-    if (trimmed) {
-      caption.focus();
-      caption.textContent = trimmed;
-      caption.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        data: trimmed,
-        inputType: "insertText",
-      }));
-      await sleep(250);
-    }
-
-    sendBtn.click();
-  }
-
-  async function dataUrlToFile(dataUrl, name, type) {
-    const response = await fetch(dataUrl);
-    const blob = await response.blob();
-    return new File([blob], name || "image.png", { type: type || blob.type || "image/png" });
-  }
-
-  // Primary image strategy: dispatch a synthetic paste event carrying the image
-  // file directly onto the compose input. WhatsApp Web's paste handler picks it
-  // up and shows the media-preview dialog — no need to navigate the clip/attach
-  // button menu.  Uses a short 5 s send-button timeout so failures fall through
-  // quickly to the clip-button fallback.
-  async function attachImageViaPasteEvent(imageAttachment, captionText) {
-    const file = await dataUrlToFile(
-      imageAttachment.dataUrl,
-      imageAttachment.name,
-      imageAttachment.type
-    );
-
-    const chatInput = await waitForElement(
-      findChatInput,
-      "Chat input not found for image paste",
-      8000
-    );
-    chatInput.focus();
-    await sleep(200);
-
-    const dt = new DataTransfer();
-    dt.items.add(file);
-
-    // Dispatch on the compose input AND the footer — WhatsApp may listen at
-    // either level depending on its React version.
-    const targets = [chatInput, document.querySelector("footer")].filter(Boolean);
-    for (const target of targets) {
-      try {
-        target.dispatchEvent(
-          new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt })
-        );
-      } catch (_) {
-        // Older Chrome build: fall back to plain Event with defineProperty
-        try {
-          const ev = new Event("paste", { bubbles: true, cancelable: true });
-          Object.defineProperty(ev, "clipboardData", { value: dt, configurable: true });
-          target.dispatchEvent(ev);
-        } catch (_2) { /* ignore */ }
-      }
-    }
-
-    // Allow WhatsApp to process the paste and render the media preview
-    await sleep(1500);
-    await sendMediaWithCaption(captionText);
-  }
-
-  async function attachAndSendImage(imageAttachment, captionText) {
-    // ── Strategy 1: clipboard paste event (no menu navigation required) ──────
-    try {
-      await attachImageViaPasteEvent(imageAttachment, captionText);
-      return; // success
-    } catch (_pasteErr) {
-      // Paste strategy failed; fall through to clip-button approach
-    }
-
-    // ── Strategy 2: click attach/clip button → inject file into file input ───
-    const attachBtn = await waitForElement(
-      findAttachButton,
-      "Attach button not found — please ensure WhatsApp Web is fully loaded."
-    );
-    attachBtn.click();
-
-    const input = await waitForImageFileInput();
-    const file = await dataUrlToFile(
-      imageAttachment.dataUrl,
-      imageAttachment.name,
-      imageAttachment.type
-    );
-
-    const dt = new DataTransfer();
-    dt.items.add(file);
-    input.files = dt.files;
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-
-    await sleep(MEDIA_RENDER_WAIT_MS);
-    await sendMediaWithCaption(captionText);
   }
 
   async function sendTextMessage(text) {
@@ -382,37 +170,39 @@
       return;
     }
 
-    const input = await waitForElement(
-      findChatInput,
-      "Message input box not found."
-    );
+    // Chat input is guaranteed to exist when waitForChatOrUnavailable resolved via
+    // findChatInput().  If it resolved via findSendButton() (text was pre-filled by the
+    // URL param), input may be absent — in that case skip filling and click send directly.
+    const input = findChatInput();
+    if (input) {
+      input.focus();
 
-    input.focus();
-    input.textContent = trimmed;
-    input.dispatchEvent(new InputEvent("input", {
-      bubbles: true,
-      data: trimmed,
-      inputType: "insertText",
-    }));
+      // Check whether the correct text is already pre-filled (from the URL ?text= param).
+      // If not, insert via execCommand so the browser fires the real input events that
+      // React's synthetic event system picks up — directly writing `textContent` bypasses
+      // React's virtual DOM and leaves the controlled component's state stale, which can
+      // cause WhatsApp to send an empty or wrong message.
+      // Note: document.execCommand is deprecated per MDN spec, but it remains the most
+      // reliable way to insert text into a React-controlled contenteditable element because
+      // it triggers the browser's native input flow, which React's synthetic event delegation
+      // captures correctly.  Direct DOM writes (textContent / innerHTML) do not.
+      const existing = (input.innerText || input.textContent || "").trim();
+      if (existing !== trimmed) {
+        document.execCommand("selectAll", false, null);
+        document.execCommand("insertText", false, trimmed);
+        // Give React time to process the DOM mutation and activate the send button.
+        await sleep(300);
+      }
+    }
 
-    await sleep(250);
+    // Wait a tick to ensure the send button is in its active (paper-plane) state.
+    await sleep(100);
     await clickSendButton();
   }
 
   async function processTrigger(message) {
-    const mode = message.mode || "TEXT_ONLY";
     const text = message.messageText || "";
-
-    await waitForChatReadyOrUnavailable();
-
-    if (mode === "IMAGE_THEN_TEXT") {
-      if (!message.imageAttachment || !message.imageAttachment.dataUrl) {
-        throw new Error("Image attachment payload is missing.");
-      }
-      await attachAndSendImage(message.imageAttachment, text);
-      return;
-    }
-
+    await waitForChatOrUnavailable();
     await sendTextMessage(text);
   }
 
@@ -446,3 +236,4 @@
     return true;
   });
 })();
+

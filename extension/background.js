@@ -19,11 +19,28 @@ let settings = {
 };
 
 let messageTemplate = "";
-let imageAttachment = null; // {name, type, size, dataUrl} | null
 let activeTabId = null;
 let processedSinceLastPause = 0;
 const MAX_WEB_OPEN_RETRIES = 2;
 let isQueueRunnerActive = false;
+const QUEUE_STORAGE_KEY = "wabm_queue";
+const EXTENSION_ENABLED_KEY = "wabm_enabled";
+const SEND_TIMEOUT_MS = 25000; // per attempt; background retries once on timeout
+
+// Extension-level on/off switch (default: enabled)
+let extensionEnabled = true;
+
+// Tracks whether the async startup restore has completed so GET_STATUS
+// waits for the persisted state before replying.
+let stateRestored = false;
+const stateRestoredCallbacks = [];
+
+function waitForStateRestored() {
+  return new Promise((resolve) => {
+    if (stateRestored) { resolve(); return; }
+    stateRestoredCallbacks.push(resolve);
+  });
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -67,6 +84,7 @@ function buildMessage(template, contact) {
 
 function broadcastStatus(extra = {}) {
   const progress = getProgress();
+  persistQueueState();
   chrome.runtime.sendMessage({
     type: "QUEUE_STATUS_UPDATE",
     ...progress,
@@ -74,6 +92,21 @@ function broadcastStatus(extra = {}) {
   }).catch(() => {
     // Popup may be closed — ignore
   });
+}
+
+function persistQueueState() {
+  // Save a snapshot so state survives service-worker restarts.
+  // Running queues are stored as "paused" so the user can see
+  // them and click Resume when the popup re-opens.
+  chrome.storage.local.set({
+    [QUEUE_STORAGE_KEY]: {
+      contacts: queue.contacts,
+      currentIndex: queue.currentIndex,
+      status: queue.status === "running" ? "paused" : queue.status,
+      messageTemplate,
+      settings,
+    },
+  }).catch(() => {});
 }
 
 function getProgress() {
@@ -84,6 +117,7 @@ function getProgress() {
   const pending = queue.contacts.filter((c) => c.status === "pending").length;
   return {
     queueStatus: queue.status,
+    extensionEnabled,
     total,
     sent,
     failed,
@@ -147,7 +181,7 @@ async function selectQueueWhatsAppTab() {
   return activeTabId;
 }
 
-function waitForWhatsAppTabReady(tabId, timeoutMs = 30000) {
+function waitForWhatsAppTabReady(tabId, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     let done = false;
 
@@ -202,10 +236,27 @@ function waitForWhatsAppTabReady(tabId, timeoutMs = 30000) {
 }
 
 async function triggerSendAction(tabId, payload) {
-  return chrome.tabs.sendMessage(tabId, {
-    type: "TRIGGER_SEND",
-    ...payload,
-  });
+  // The content script may not be fully initialised on the first tick after
+  // navigation completes. Retry a few times before giving up.
+  const MAX_MSG_RETRIES = 4;
+  let lastErr;
+  for (let i = 0; i < MAX_MSG_RETRIES; i++) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, {
+        type: "TRIGGER_SEND",
+        ...payload,
+      });
+    } catch (err) {
+      lastErr = err;
+      const msg = String((err && err.message) || "").toLowerCase();
+      // Only retry on "no receiver" errors — bail out on anything else.
+      if (!msg.includes("receiving end does not exist") && !msg.includes("could not establish")) {
+        throw err;
+      }
+      await sleep(600);
+    }
+  }
+  throw lastErr;
 }
 
 async function ensureWhatsAppWebTab(url) {
@@ -220,7 +271,12 @@ async function ensureWhatsAppWebTab(url) {
   }
 
   await chrome.tabs.update(activeTabId, { url, active: true });
-  await waitForWhatsAppTabReady(activeTabId, 30000);
+  await waitForWhatsAppTabReady(activeTabId, 20000);
+
+  // Give the content script a moment to finish initialising after the page's
+  // load event fires — this avoids "Receiving end does not exist" errors.
+  await sleep(400);
+
   return activeTabId;
 }
 
@@ -232,7 +288,7 @@ async function openWhatsAppWebTabWithRetry(url, maxRetries = MAX_WEB_OPEN_RETRIE
     } catch (err) {
       lastError = err;
       if (attempt < maxRetries) {
-        await sleep(1200);
+        await sleep(500);
       }
     }
   }
@@ -241,20 +297,27 @@ async function openWhatsAppWebTabWithRetry(url, maxRetries = MAX_WEB_OPEN_RETRIE
 
 // ── Send a single contact ─────────────────────────────────────────────────────
 
-async function sendToContact(contact) {
+/**
+ * Attempt to send a message to one contact.
+ * Automatically retries once on timeout/network failures so that valid WhatsApp
+ * numbers are never permanently skipped due to a slow load.  Non-WhatsApp numbers
+ * are detected instantly by the content script and reported back immediately
+ * (no retry needed — they are classified as "skipped").
+ *
+ * @param {object} contact
+ * @param {number} [attempt=0] - internal retry counter
+ */
+async function sendToContact(contact, attempt = 0) {
+  const MAX_ATTEMPTS = 2;
   const message = buildMessage(messageTemplate, contact);
-  const hasImage = false;
   const phone = contact.phone.replace(/^\+/, "");
   const params = new URLSearchParams({
     phone,
     type: "phone_number",
     app_absent: "1",
+    text: message,
   });
-  if (!hasImage) {
-    params.set("text", message);
-  }
   const url = `https://web.whatsapp.com/send?${params.toString()}`;
-  const SEND_TIMEOUT_MS = hasImage ? 60000 : 30000;
 
   try {
     await openWhatsAppWebTabWithRetry(url);
@@ -264,7 +327,7 @@ async function sendToContact(contact) {
 
   // Wait for the content script to confirm/deny the send.
   // Listener must be attached before TRIGGER_SEND to avoid missing fast responses.
-  return new Promise((resolve) => {
+  const result = await new Promise((resolve) => {
     let settled = false;
 
     const timer = setTimeout(() => {
@@ -298,9 +361,8 @@ async function sendToContact(contact) {
     chrome.runtime.onMessage.addListener(onMessage);
 
     triggerSendAction(activeTabId, {
-      mode: hasImage ? "IMAGE_THEN_TEXT" : "TEXT_ONLY",
+      mode: "TEXT_ONLY",
       messageText: message,
-      imageAttachment: hasImage ? imageAttachment : null,
     }).catch((err) => {
       if (settled) return;
       settled = true;
@@ -309,6 +371,15 @@ async function sendToContact(contact) {
       resolve({ success: false, reason: `Failed to trigger send action: ${err.message}` });
     });
   });
+
+  // Auto-retry once for timeout / network errors on valid WhatsApp numbers.
+  // Never retry "not on WhatsApp" or "invalid phone" — those are immediate skips.
+  if (!result.success && attempt < MAX_ATTEMPTS - 1 && !isSkippableReason(result.reason)) {
+    await sleep(1000);
+    return sendToContact(contact, attempt + 1);
+  }
+
+  return result;
 }
 
 // ── Main queue runner ─────────────────────────────────────────────────────────
@@ -414,6 +485,10 @@ async function runQueue() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case "START_QUEUE": {
+      if (!extensionEnabled) {
+        sendResponse({ ok: false, error: "Extension is disabled. Enable it using the toggle in the sidebar." });
+        break;
+      }
       (async () => {
         try {
           await selectQueueWhatsAppTab();
@@ -426,7 +501,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           queue.currentIndex = 0;
           queue.status = "running";
           messageTemplate = message.messageTemplate || "";
-          imageAttachment = null;
           settings = normalizeSettings(message);
           processedSinceLastPause = 0;
           broadcastStatus();
@@ -463,13 +537,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case "STOP_QUEUE": {
       queue.status = "stopped";
+      // Mark remaining pending as skipped immediately
+      queue.contacts.forEach((c) => {
+        if (c.status === "pending" || c.status === "sending") c.status = "skipped";
+      });
       broadcastStatus();
       sendResponse({ ok: true });
       break;
     }
 
     case "GET_STATUS": {
-      sendResponse(getProgress());
+      // Wait until the async startup restore completes before replying
+      // (prevents the popup from seeing stale/empty state on quick open).
+      waitForStateRestored().then(() => sendResponse(getProgress()));
+      break;
+    }
+
+    case "SET_EXTENSION_ENABLED": {
+      extensionEnabled = !!message.enabled;
+      chrome.storage.local.set({ [EXTENSION_ENABLED_KEY]: extensionEnabled }).catch(() => {});
+      // If disabling while queue is running, pause it automatically.
+      if (!extensionEnabled && queue.status === "running") {
+        queue.status = "paused";
+        broadcastStatus();
+      }
+      sendResponse({ ok: true, extensionEnabled });
       break;
     }
 
@@ -481,3 +573,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Return true to keep the message channel open for async sendResponse if needed
   return true;
 });
+
+// ── Startup: restore persisted queue state ────────────────────────────────────
+
+(async () => {
+  try {
+    const result = await chrome.storage.local.get([QUEUE_STORAGE_KEY, EXTENSION_ENABLED_KEY]);
+
+    // Restore extension enabled state (defaults to true if never set)
+    if (typeof result[EXTENSION_ENABLED_KEY] === "boolean") {
+      extensionEnabled = result[EXTENSION_ENABLED_KEY];
+    }
+
+    const saved = result[QUEUE_STORAGE_KEY];
+    if (saved && Array.isArray(saved.contacts) && saved.contacts.length > 0) {
+      queue.contacts = saved.contacts;
+      queue.currentIndex = saved.currentIndex || 0;
+      // Restore as paused so the user reviews and clicks Resume.
+      // Never auto-resume "running" — the WhatsApp tab URL may have changed.
+      queue.status = (saved.status === "paused") ? "paused" : (saved.status || "idle");
+      messageTemplate = saved.messageTemplate || "";
+      if (saved.settings) {
+        settings = normalizeSettings(saved.settings);
+      }
+
+      // Any contact stuck in "sending" was interrupted mid-send — reset to pending.
+      queue.contacts.forEach((c) => {
+        if (c.status === "sending") c.status = "pending";
+      });
+
+      // Rewind currentIndex to cover any contacts that were reset from "sending".
+      const firstPending = queue.contacts.findIndex((c) => c.status === "pending");
+      if (firstPending !== -1 && firstPending < queue.currentIndex) {
+        queue.currentIndex = firstPending;
+      }
+    }
+  } catch (_) {
+    // Ignore storage errors on startup
+  } finally {
+    // Signal that state restoration is complete so GET_STATUS can reply.
+    stateRestored = true;
+    stateRestoredCallbacks.splice(0).forEach((fn) => fn());
+  }
+})();

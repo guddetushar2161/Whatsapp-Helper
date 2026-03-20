@@ -91,6 +91,25 @@ const DEFAULT_SETTINGS = {
   pauseDuration: 120,
 };
 
+const EXTENSION_ENABLED_KEY = "wabm_enabled";
+
+/**
+ * Persist the extension enabled/disabled flag
+ * @param {boolean} enabled
+ */
+export async function saveExtensionEnabled(enabled) {
+  await set(EXTENSION_ENABLED_KEY, !!enabled);
+}
+
+/**
+ * Load the extension enabled flag (defaults to true)
+ * @returns {Promise<boolean>}
+ */
+export async function loadExtensionEnabled() {
+  const val = await get(EXTENSION_ENABLED_KEY);
+  return val === false ? false : true;
+}
+
 /**
  * Save settings object
  * @param {object} settings

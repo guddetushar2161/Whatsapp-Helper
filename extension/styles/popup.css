@@ -355,18 +355,6 @@ textarea {
 #dropZone .drop-text { font-size: 12.5px; color: var(--color-text-muted); margin-top: 6px; }
 #dropZone .drop-hint { font-size: 11px; color: var(--color-text-muted); margin-top: 3px; }
 
-/* ── Optional media meta ─────────────────────────────────── */
-.media-meta {
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  font-size: 11.5px;
-  color: var(--color-text-muted);
-  line-height: 1.35;
-  word-break: break-word;
-}
-
 /* ── Stats display ───────────────────────────────────────── */
 #statsDisplay {
   display: none;
@@ -728,3 +716,72 @@ tbody td {
 }
 
 #pauseNotice.visible { display: flex; }
+
+/* ── Extension enable / disable toggle ───────────────────── */
+.ext-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.08);
+  border-radius: var(--radius-sm);
+}
+
+.ext-toggle-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.85);
+  letter-spacing: 0.4px;
+  user-select: none;
+}
+
+/* Disabled state — label turns amber */
+.ext-toggle-label.disabled {
+  color: #ffcc00;
+}
+
+.ext-toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.ext-toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.ext-toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,0.2);
+  border-radius: 18px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.ext-toggle-slider::before {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform var(--transition);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+}
+
+.ext-toggle-switch input:checked + .ext-toggle-slider {
+  background: var(--color-primary);
+}
+
+.ext-toggle-switch input:checked + .ext-toggle-slider::before {
+  transform: translateX(16px);
+}

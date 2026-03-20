@@ -4,7 +4,7 @@
 import { cleanAndValidateNumbers, deduplicateContacts } from "./utils/parser.js";
 import { readFile } from "./utils/excelReader.js";
 import { exportToXlsx, exportToCsv } from "./utils/excelWriter.js";
-import { saveTemplate, loadTemplates, deleteTemplate, saveSettings, loadSettings } from "./utils/storage.js";
+import { saveTemplate, loadTemplates, deleteTemplate, saveSettings, loadSettings, saveExtensionEnabled, loadExtensionEnabled } from "./utils/storage.js";
 
 // ── Module-level state ────────────────────────────────────────────────────────
 
@@ -12,8 +12,6 @@ let contacts = [];         // Array<{name, phone, status, timestamp, notes}>
 let invalidContacts = [];  // Array<{phone, reason}>
 let duplicatesRemoved = 0;
 let totalRawCount = 0;
-let optionalImage = null;  // {name, type, size, dataUrl} | null
-const IMAGE_MODE_ENABLED = false;
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 
@@ -37,18 +35,6 @@ function formatTimestamp(iso) {
   } catch (_) {
     return iso;
   }
-}
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let idx = 0;
-  while (value >= 1024 && idx < units.length - 1) {
-    value /= 1024;
-    idx++;
-  }
-  return `${value.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -307,132 +293,41 @@ function initStep2() {
     renderTemplateList();
   });
 
-  initImageAttachment();
   renderTemplateList();
 }
 
-function updateImageMeta() {
-  const meta = $("imageMeta");
-  const clearBtn = $("clearImageBtn");
-  if (!IMAGE_MODE_ENABLED) {
-    optionalImage = null;
-    meta.textContent = "Image mode is temporarily disabled for stability. Text-only mode is active.";
-    clearBtn.style.display = "none";
-    return;
+// ── Extension enable / disable toggle ────────────────────────────────────────
+
+function applyExtensionEnabledUI(enabled) {
+  const toggle = $("extToggle");
+  const label = $("extToggleLabel");
+  const startBtn = $("startBtn");
+
+  if (toggle) toggle.checked = enabled;
+  if (label) {
+    label.textContent = enabled ? "Enabled" : "Disabled";
+    label.classList.toggle("disabled", !enabled);
   }
-  if (!optionalImage) {
-    meta.textContent = "No image selected. Text-only mode. (Tip: paste an image into the message box to attach it.)";
-    clearBtn.style.display = "none";
-    return;
+  if (startBtn) {
+    startBtn.disabled = !enabled;
+    startBtn.title = enabled ? "" : "Enable the extension first using the toggle in the sidebar.";
   }
-  meta.textContent = `Selected: ${optionalImage.name} (${formatBytes(optionalImage.size)})`;
-  clearBtn.style.display = "inline-flex";
 }
 
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Failed to read image file."));
-    reader.readAsDataURL(file);
-  });
-}
+function initExtensionToggle() {
+  const toggle = $("extToggle");
+  if (!toggle) return;
 
-function initImageAttachment() {
-  const imageInput = $("imageInput");
-  const pickBtn = $("pickImageBtn");
-  const clearBtn = $("clearImageBtn");
-  const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
-
-  if (!IMAGE_MODE_ENABLED) {
-    optionalImage = null;
-    imageInput.value = "";
-    pickBtn.disabled = true;
-    pickBtn.title = "Image sending is temporarily disabled";
-    clearBtn.style.display = "none";
-    updateImageMeta();
-    return;
-  }
-
-  pickBtn.addEventListener("click", () => imageInput.click());
-
-  clearBtn.addEventListener("click", () => {
-    optionalImage = null;
-    imageInput.value = "";
-    updateImageMeta();
-  });
-
-  imageInput.addEventListener("change", async () => {
-    const file = imageInput.files && imageInput.files[0];
-    if (!file) return;
-
-    if (!file.type || !file.type.startsWith("image/")) {
-      alert("Please select a valid image file.");
-      imageInput.value = "";
-      return;
-    }
-
-    if (file.size > MAX_IMAGE_SIZE) {
-      alert("Image is too large. Please select an image up to 5 MB.");
-      imageInput.value = "";
-      return;
-    }
-
+  toggle.addEventListener("change", async () => {
+    const enabled = toggle.checked;
+    applyExtensionEnabledUI(enabled);
+    await saveExtensionEnabled(enabled);
     try {
-      const dataUrl = await fileToDataUrl(file);
-      optionalImage = {
-        name: file.name,
-        type: file.type,
-        size: file.size,
-        dataUrl,
-      };
-      updateImageMeta();
-    } catch (err) {
-      optionalImage = null;
-      imageInput.value = "";
-      alert(`Failed to read image: ${err.message}`);
-      updateImageMeta();
+      await chrome.runtime.sendMessage({ type: "SET_EXTENSION_ENABLED", enabled });
+    } catch (_) {
+      // Background may not be ready yet — storage write is the source of truth.
     }
   });
-
-  // Paste-to-attach: intercept image paste in the message textarea
-  const messageInput = $("messageInput");
-  messageInput.addEventListener("paste", async (e) => {
-    const items = e.clipboardData && e.clipboardData.items;
-    if (!items) return;
-
-    let imageFile = null;
-    for (const item of items) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
-        imageFile = item.getAsFile();
-        break;
-      }
-    }
-
-    if (!imageFile) return; // no image in clipboard — let normal text paste proceed
-
-    e.preventDefault(); // prevent browser from inserting broken image markup
-
-    if (imageFile.size > MAX_IMAGE_SIZE) {
-      alert("Pasted image is too large. Please use an image up to 5 MB.");
-      return;
-    }
-
-    try {
-      const dataUrl = await fileToDataUrl(imageFile);
-      optionalImage = {
-        name: imageFile.name || "pasted-image.png",
-        type: imageFile.type || "image/png",
-        size: imageFile.size,
-        dataUrl,
-      };
-      updateImageMeta();
-    } catch (err) {
-      alert(`Failed to read pasted image: ${err.message}`);
-    }
-  });
-
-  updateImageMeta();
 }
 
 // ── Step 3: Configure & Send ──────────────────────────────────────────────────
@@ -536,7 +431,6 @@ function initStep3() {
         type: "START_QUEUE",
         contacts,
         messageTemplate: message,
-        imageAttachment: null,
         ...settings,
       });
 
@@ -577,6 +471,11 @@ function initStep3() {
       updateLiveStatus(message.contacts);
     }
 
+    // Sync toggle state if background reports a change
+    if (typeof message.extensionEnabled === "boolean") {
+      applyExtensionEnabledUI(message.extensionEnabled);
+    }
+
     // Extended pause notice
     const pauseNotice = $("pauseNotice");
     if (message.extendedPause) {
@@ -600,6 +499,33 @@ function initStep3() {
     if (response.contacts) {
       contacts = response.contacts;
       updateLiveStatus(response.contacts);
+    }
+
+    // Sync extension toggle state from background
+    if (typeof response.extensionEnabled === "boolean") {
+      applyExtensionEnabledUI(response.extensionEnabled);
+    }
+
+    // Show a non-intrusive banner when a paused queue was restored from a
+    // previous session so the user knows they can click Resume.
+    if (
+      response.queueStatus === "paused" &&
+      Array.isArray(response.contacts) &&
+      response.contacts.length > 0
+    ) {
+      const done = response.contacts.filter(
+        (c) => c.status === "sent" || c.status === "failed" || c.status === "skipped"
+      ).length;
+      const pending = response.contacts.filter((c) => c.status === "pending").length;
+      if (pending > 0) {
+        const notice = $("pauseNotice");
+        const noticeText = $("pauseNoticeText");
+        if (notice && noticeText) {
+          noticeText.textContent =
+            `Queue restored — ${done} done, ${pending} remaining. Click ▶ Resume to continue.`;
+          notice.classList.add("visible");
+        }
+      }
     }
   });
 }
@@ -668,6 +594,7 @@ async function init() {
   initStep2();
   initStep3();
   initStep4();
+  initExtensionToggle();
 
   // Restore settings
   try {
@@ -679,6 +606,14 @@ async function init() {
     $("pauseDuration").value = settings.pauseDuration ?? 120;
   } catch (_) {
     // Ignore storage errors on init
+  }
+
+  // Restore extension enabled state
+  try {
+    const enabled = await loadExtensionEnabled();
+    applyExtensionEnabledUI(enabled);
+  } catch (_) {
+    applyExtensionEnabledUI(true);
   }
 
   // Load templates
