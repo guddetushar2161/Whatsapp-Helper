@@ -154,7 +154,12 @@
   }
 
   async function clickSendButton() {
-    const btn = findSendButton();
+    // The paper-plane send button may take a frame or two to appear after text is inserted.
+    let btn = findSendButton();
+    if (!btn) {
+      await sleep(300);
+      btn = findSendButton();
+    }
     if (!btn) throw new Error("Send button not found after chat was ready");
     btn.click();
   }
@@ -171,15 +176,27 @@
     const input = findChatInput();
     if (input) {
       input.focus();
-      input.textContent = trimmed;
-      input.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        data: trimmed,
-        inputType: "insertText",
-      }));
-      await sleep(100);
+
+      // Check whether the correct text is already pre-filled (from the URL ?text= param).
+      // If not, insert via execCommand so the browser fires the real input events that
+      // React's synthetic event system picks up — directly writing `textContent` bypasses
+      // React's virtual DOM and leaves the controlled component's state stale, which can
+      // cause WhatsApp to send an empty or wrong message.
+      // Note: document.execCommand is deprecated per MDN spec, but it remains the most
+      // reliable way to insert text into a React-controlled contenteditable element because
+      // it triggers the browser's native input flow, which React's synthetic event delegation
+      // captures correctly.  Direct DOM writes (textContent / innerHTML) do not.
+      const existing = (input.innerText || input.textContent || "").trim();
+      if (existing !== trimmed) {
+        document.execCommand("selectAll", false, null);
+        document.execCommand("insertText", false, trimmed);
+        // Give React time to process the DOM mutation and activate the send button.
+        await sleep(300);
+      }
     }
 
+    // Wait a tick to ensure the send button is in its active (paper-plane) state.
+    await sleep(100);
     await clickSendButton();
   }
 

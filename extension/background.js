@@ -24,7 +24,11 @@ let processedSinceLastPause = 0;
 const MAX_WEB_OPEN_RETRIES = 2;
 let isQueueRunnerActive = false;
 const QUEUE_STORAGE_KEY = "wabm_queue";
+const EXTENSION_ENABLED_KEY = "wabm_enabled";
 const SEND_TIMEOUT_MS = 25000; // per attempt; background retries once on timeout
+
+// Extension-level on/off switch (default: enabled)
+let extensionEnabled = true;
 
 // Tracks whether the async startup restore has completed so GET_STATUS
 // waits for the persisted state before replying.
@@ -113,6 +117,7 @@ function getProgress() {
   const pending = queue.contacts.filter((c) => c.status === "pending").length;
   return {
     queueStatus: queue.status,
+    extensionEnabled,
     total,
     sent,
     failed,
@@ -231,10 +236,27 @@ function waitForWhatsAppTabReady(tabId, timeoutMs = 20000) {
 }
 
 async function triggerSendAction(tabId, payload) {
-  return chrome.tabs.sendMessage(tabId, {
-    type: "TRIGGER_SEND",
-    ...payload,
-  });
+  // The content script may not be fully initialised on the first tick after
+  // navigation completes. Retry a few times before giving up.
+  const MAX_MSG_RETRIES = 4;
+  let lastErr;
+  for (let i = 0; i < MAX_MSG_RETRIES; i++) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, {
+        type: "TRIGGER_SEND",
+        ...payload,
+      });
+    } catch (err) {
+      lastErr = err;
+      const msg = String((err && err.message) || "").toLowerCase();
+      // Only retry on "no receiver" errors — bail out on anything else.
+      if (!msg.includes("receiving end does not exist") && !msg.includes("could not establish")) {
+        throw err;
+      }
+      await sleep(600);
+    }
+  }
+  throw lastErr;
 }
 
 async function ensureWhatsAppWebTab(url) {
@@ -250,6 +272,11 @@ async function ensureWhatsAppWebTab(url) {
 
   await chrome.tabs.update(activeTabId, { url, active: true });
   await waitForWhatsAppTabReady(activeTabId, 20000);
+
+  // Give the content script a moment to finish initialising after the page's
+  // load event fires — this avoids "Receiving end does not exist" errors.
+  await sleep(400);
+
   return activeTabId;
 }
 
@@ -458,6 +485,10 @@ async function runQueue() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case "START_QUEUE": {
+      if (!extensionEnabled) {
+        sendResponse({ ok: false, error: "Extension is disabled. Enable it using the toggle in the sidebar." });
+        break;
+      }
       (async () => {
         try {
           await selectQueueWhatsAppTab();
@@ -522,6 +553,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
     }
 
+    case "SET_EXTENSION_ENABLED": {
+      extensionEnabled = !!message.enabled;
+      chrome.storage.local.set({ [EXTENSION_ENABLED_KEY]: extensionEnabled }).catch(() => {});
+      // If disabling while queue is running, pause it automatically.
+      if (!extensionEnabled && queue.status === "running") {
+        queue.status = "paused";
+        broadcastStatus();
+      }
+      sendResponse({ ok: true, extensionEnabled });
+      break;
+    }
+
     // SEND_CONFIRMED and SEND_FAILED are handled inside sendToContact's scoped listener
     default:
       break;
@@ -535,7 +578,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 (async () => {
   try {
-    const result = await chrome.storage.local.get(QUEUE_STORAGE_KEY);
+    const result = await chrome.storage.local.get([QUEUE_STORAGE_KEY, EXTENSION_ENABLED_KEY]);
+
+    // Restore extension enabled state (defaults to true if never set)
+    if (typeof result[EXTENSION_ENABLED_KEY] === "boolean") {
+      extensionEnabled = result[EXTENSION_ENABLED_KEY];
+    }
+
     const saved = result[QUEUE_STORAGE_KEY];
     if (saved && Array.isArray(saved.contacts) && saved.contacts.length > 0) {
       queue.contacts = saved.contacts;

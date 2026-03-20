@@ -4,7 +4,7 @@
 import { cleanAndValidateNumbers, deduplicateContacts } from "./utils/parser.js";
 import { readFile } from "./utils/excelReader.js";
 import { exportToXlsx, exportToCsv } from "./utils/excelWriter.js";
-import { saveTemplate, loadTemplates, deleteTemplate, saveSettings, loadSettings } from "./utils/storage.js";
+import { saveTemplate, loadTemplates, deleteTemplate, saveSettings, loadSettings, saveExtensionEnabled, loadExtensionEnabled } from "./utils/storage.js";
 
 // ── Module-level state ────────────────────────────────────────────────────────
 
@@ -296,6 +296,40 @@ function initStep2() {
   renderTemplateList();
 }
 
+// ── Extension enable / disable toggle ────────────────────────────────────────
+
+function applyExtensionEnabledUI(enabled) {
+  const toggle = $("extToggle");
+  const label = $("extToggleLabel");
+  const startBtn = $("startBtn");
+
+  if (toggle) toggle.checked = enabled;
+  if (label) {
+    label.textContent = enabled ? "Enabled" : "Disabled";
+    label.classList.toggle("disabled", !enabled);
+  }
+  if (startBtn) {
+    startBtn.disabled = !enabled;
+    startBtn.title = enabled ? "" : "Enable the extension first using the toggle in the sidebar.";
+  }
+}
+
+function initExtensionToggle() {
+  const toggle = $("extToggle");
+  if (!toggle) return;
+
+  toggle.addEventListener("change", async () => {
+    const enabled = toggle.checked;
+    applyExtensionEnabledUI(enabled);
+    await saveExtensionEnabled(enabled);
+    try {
+      await chrome.runtime.sendMessage({ type: "SET_EXTENSION_ENABLED", enabled });
+    } catch (_) {
+      // Background may not be ready yet — storage write is the source of truth.
+    }
+  });
+}
+
 // ── Step 3: Configure & Send ──────────────────────────────────────────────────
 
 function updateBatchWarning() {
@@ -437,6 +471,11 @@ function initStep3() {
       updateLiveStatus(message.contacts);
     }
 
+    // Sync toggle state if background reports a change
+    if (typeof message.extensionEnabled === "boolean") {
+      applyExtensionEnabledUI(message.extensionEnabled);
+    }
+
     // Extended pause notice
     const pauseNotice = $("pauseNotice");
     if (message.extendedPause) {
@@ -460,6 +499,11 @@ function initStep3() {
     if (response.contacts) {
       contacts = response.contacts;
       updateLiveStatus(response.contacts);
+    }
+
+    // Sync extension toggle state from background
+    if (typeof response.extensionEnabled === "boolean") {
+      applyExtensionEnabledUI(response.extensionEnabled);
     }
 
     // Show a non-intrusive banner when a paused queue was restored from a
@@ -550,6 +594,7 @@ async function init() {
   initStep2();
   initStep3();
   initStep4();
+  initExtensionToggle();
 
   // Restore settings
   try {
@@ -561,6 +606,14 @@ async function init() {
     $("pauseDuration").value = settings.pauseDuration ?? 120;
   } catch (_) {
     // Ignore storage errors on init
+  }
+
+  // Restore extension enabled state
+  try {
+    const enabled = await loadExtensionEnabled();
+    applyExtensionEnabledUI(enabled);
+  } catch (_) {
+    applyExtensionEnabledUI(true);
   }
 
   // Load templates
