@@ -20,10 +20,9 @@
     'div[contenteditable="true"][role="textbox"]',
   ];
 
-  // Reduced from 20 000 ms — chat UI loads quickly once navigated
-  const WAIT_TIMEOUT_MS = 12000;
-  // Reduced from 1 500 ms — grace window for "not on WhatsApp" modal detection
-  const GRACE_MS = 500;
+  // Generous timeout — valid WhatsApp numbers may load slowly on some networks.
+  // Non-WhatsApp numbers are detected instantly via MutationObserver (no polling).
+  const WAIT_TIMEOUT_MS = 15000;
 
   const UNAVAILABLE_PATTERNS = [
     "phone number shared via url is invalid",
@@ -69,8 +68,19 @@
   }
 
   function isUnavailableNumberVisible() {
-    const text = (document.body && document.body.innerText ? document.body.innerText : "").toLowerCase();
-    return UNAVAILABLE_PATTERNS.some((pattern) => text.includes(pattern));
+    // Check specific dialog / alert containers first — much faster than scanning the entire body.
+    const containers = document.querySelectorAll(
+      '[data-testid="alert-popup"], [data-testid="confirm-popup"], [role="alertdialog"], [role="dialog"], [role="alert"]'
+    );
+
+    for (const el of containers) {
+      const text = (el.innerText || el.textContent || "").toLowerCase();
+      if (UNAVAILABLE_PATTERNS.some((p) => text.includes(p))) return true;
+    }
+
+    // Fallback: full body scan (handles inline error messages outside dialogs)
+    const body = document.body ? document.body.innerText : "";
+    return UNAVAILABLE_PATTERNS.some((p) => body.toLowerCase().includes(p));
   }
 
   // Automatically click the OK button on the "isn't on WhatsApp" modal so it
@@ -92,86 +102,61 @@
     }
   }
 
-  function waitForElement(findFn, notFoundMessage, timeoutMs = WAIT_TIMEOUT_MS) {
+  /**
+   * Wait for either the chat compose box to appear OR an "unavailable" modal.
+   * Uses MutationObserver — zero polling, resolves/rejects the instant the DOM changes.
+   * For valid WhatsApp numbers the input typically appears in 2-5 s.
+   * For non-WhatsApp numbers the error modal is detected within one DOM mutation tick.
+   */
+  function waitForChatOrUnavailable(timeoutMs = WAIT_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
-      const immediate = findFn();
-      if (immediate) {
-        resolve(immediate);
+      // Immediate check before attaching observer (handles pre-loaded pages)
+      if (isUnavailableNumberVisible()) {
+        dismissUnavailablePopup().catch(() => {});
+        reject(new Error("Number unavailable: contact is not on WhatsApp"));
+        return;
+      }
+      if (findChatInput() || findSendButton()) {
+        resolve();
         return;
       }
 
+      let settled = false;
+
+      function finish(err) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(tid);
+        observer.disconnect();
+        if (err) reject(err);
+        else resolve();
+      }
+
       const observer = new MutationObserver(() => {
-        const element = findFn();
-        if (element) {
-          observer.disconnect();
-          clearTimeout(timeoutId);
-          resolve(element);
+        if (settled) return;
+        if (isUnavailableNumberVisible()) {
+          dismissUnavailablePopup().catch(() => {});
+          finish(new Error("Number unavailable: contact is not on WhatsApp"));
+          return;
+        }
+        if (findChatInput() || findSendButton()) {
+          finish();
         }
       });
 
       observer.observe(document.body, { childList: true, subtree: true });
 
-      const timeoutId = setTimeout(() => {
-        observer.disconnect();
-        reject(new Error(notFoundMessage));
-      }, timeoutMs);
-    });
-  }
-
-  function waitForSendButton(timeoutMs = WAIT_TIMEOUT_MS) {
-    return new Promise((resolve, reject) => {
-      const immediate = findSendButton();
-      if (immediate) {
-        resolve(immediate);
-        return;
-      }
-
-      const observer = new MutationObserver(() => {
-        const btn = findSendButton();
-        if (btn) {
-          observer.disconnect();
-          clearTimeout(timeoutId);
-          resolve(btn);
-        }
-      });
-
-      observer.observe(document.body, { childList: true, subtree: true });
-
-      const timeoutId = setTimeout(() => {
-        observer.disconnect();
-        reject(new Error("Send button did not appear in time"));
-      }, timeoutMs);
+      const tid = setTimeout(
+        () => finish(new Error("Chat did not become ready in time")),
+        timeoutMs
+      );
     });
   }
 
   async function clickSendButton() {
-    const btn = await waitForSendButton();
+    const btn = findSendButton();
+    if (!btn) throw new Error("Send button not found after chat was ready");
     btn.click();
-  }
-
-  async function waitForChatReadyOrUnavailable(timeoutMs = WAIT_TIMEOUT_MS) {
-    const started = Date.now();
-    let chatReadyAt = null;
-
-    while (Date.now() - started < timeoutMs) {
-      if (isUnavailableNumberVisible()) {
-        await dismissUnavailablePopup();
-        throw new Error("Number unavailable: contact is not on WhatsApp");
-      }
-
-      const isReady = !!(findChatInput() || findSendButton());
-      if (isReady) {
-        if (!chatReadyAt) chatReadyAt = Date.now();
-        // Only proceed once the grace period has elapsed without a modal appearing
-        if (Date.now() - chatReadyAt >= GRACE_MS) {
-          return;
-        }
-      }
-
-      await sleep(120);
-    }
-
-    throw new Error("Chat did not become ready in time");
   }
 
   async function sendTextMessage(text) {
@@ -180,26 +165,27 @@
       return;
     }
 
-    const input = await waitForElement(
-      findChatInput,
-      "Message input box not found."
-    );
+    // Chat input is guaranteed to exist when waitForChatOrUnavailable resolved via
+    // findChatInput().  If it resolved via findSendButton() (text was pre-filled by the
+    // URL param), input may be absent — in that case skip filling and click send directly.
+    const input = findChatInput();
+    if (input) {
+      input.focus();
+      input.textContent = trimmed;
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        data: trimmed,
+        inputType: "insertText",
+      }));
+      await sleep(100);
+    }
 
-    input.focus();
-    input.textContent = trimmed;
-    input.dispatchEvent(new InputEvent("input", {
-      bubbles: true,
-      data: trimmed,
-      inputType: "insertText",
-    }));
-
-    await sleep(100);
     await clickSendButton();
   }
 
   async function processTrigger(message) {
     const text = message.messageText || "";
-    await waitForChatReadyOrUnavailable();
+    await waitForChatOrUnavailable();
     await sendTextMessage(text);
   }
 

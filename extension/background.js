@@ -24,7 +24,19 @@ let processedSinceLastPause = 0;
 const MAX_WEB_OPEN_RETRIES = 2;
 let isQueueRunnerActive = false;
 const QUEUE_STORAGE_KEY = "wabm_queue";
-const SEND_TIMEOUT_MS = 25000;
+const SEND_TIMEOUT_MS = 25000; // per attempt; background retries once on timeout
+
+// Tracks whether the async startup restore has completed so GET_STATUS
+// waits for the persisted state before replying.
+let stateRestored = false;
+const stateRestoredCallbacks = [];
+
+function waitForStateRestored() {
+  return new Promise((resolve) => {
+    if (stateRestored) { resolve(); return; }
+    stateRestoredCallbacks.push(resolve);
+  });
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -258,7 +270,18 @@ async function openWhatsAppWebTabWithRetry(url, maxRetries = MAX_WEB_OPEN_RETRIE
 
 // ── Send a single contact ─────────────────────────────────────────────────────
 
-async function sendToContact(contact) {
+/**
+ * Attempt to send a message to one contact.
+ * Automatically retries once on timeout/network failures so that valid WhatsApp
+ * numbers are never permanently skipped due to a slow load.  Non-WhatsApp numbers
+ * are detected instantly by the content script and reported back immediately
+ * (no retry needed — they are classified as "skipped").
+ *
+ * @param {object} contact
+ * @param {number} [attempt=0] - internal retry counter
+ */
+async function sendToContact(contact, attempt = 0) {
+  const MAX_ATTEMPTS = 2;
   const message = buildMessage(messageTemplate, contact);
   const phone = contact.phone.replace(/^\+/, "");
   const params = new URLSearchParams({
@@ -277,7 +300,7 @@ async function sendToContact(contact) {
 
   // Wait for the content script to confirm/deny the send.
   // Listener must be attached before TRIGGER_SEND to avoid missing fast responses.
-  return new Promise((resolve) => {
+  const result = await new Promise((resolve) => {
     let settled = false;
 
     const timer = setTimeout(() => {
@@ -321,6 +344,15 @@ async function sendToContact(contact) {
       resolve({ success: false, reason: `Failed to trigger send action: ${err.message}` });
     });
   });
+
+  // Auto-retry once for timeout / network errors on valid WhatsApp numbers.
+  // Never retry "not on WhatsApp" or "invalid phone" — those are immediate skips.
+  if (!result.success && attempt < MAX_ATTEMPTS - 1 && !isSkippableReason(result.reason)) {
+    await sleep(1000);
+    return sendToContact(contact, attempt + 1);
+  }
+
+  return result;
 }
 
 // ── Main queue runner ─────────────────────────────────────────────────────────
@@ -484,7 +516,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     case "GET_STATUS": {
-      sendResponse(getProgress());
+      // Wait until the async startup restore completes before replying
+      // (prevents the popup from seeing stale/empty state on quick open).
+      waitForStateRestored().then(() => sendResponse(getProgress()));
       break;
     }
 
@@ -513,8 +547,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (saved.settings) {
         settings = normalizeSettings(saved.settings);
       }
+
+      // Any contact stuck in "sending" was interrupted mid-send — reset to pending.
+      queue.contacts.forEach((c) => {
+        if (c.status === "sending") c.status = "pending";
+      });
+
+      // Rewind currentIndex to cover any contacts that were reset from "sending".
+      const firstPending = queue.contacts.findIndex((c) => c.status === "pending");
+      if (firstPending !== -1 && firstPending < queue.currentIndex) {
+        queue.currentIndex = firstPending;
+      }
     }
   } catch (_) {
     // Ignore storage errors on startup
+  } finally {
+    // Signal that state restoration is complete so GET_STATUS can reply.
+    stateRestored = true;
+    stateRestoredCallbacks.splice(0).forEach((fn) => fn());
   }
 })();

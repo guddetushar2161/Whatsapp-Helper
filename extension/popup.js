@@ -461,6 +461,28 @@ function initStep3() {
       contacts = response.contacts;
       updateLiveStatus(response.contacts);
     }
+
+    // Show a non-intrusive banner when a paused queue was restored from a
+    // previous session so the user knows they can click Resume.
+    if (
+      response.queueStatus === "paused" &&
+      Array.isArray(response.contacts) &&
+      response.contacts.length > 0
+    ) {
+      const done = response.contacts.filter(
+        (c) => c.status === "sent" || c.status === "failed" || c.status === "skipped"
+      ).length;
+      const pending = response.contacts.filter((c) => c.status === "pending").length;
+      if (pending > 0) {
+        const notice = $("pauseNotice");
+        const noticeText = $("pauseNoticeText");
+        if (notice && noticeText) {
+          noticeText.textContent =
+            `Queue restored — ${done} done, ${pending} remaining. Click ▶ Resume to continue.`;
+          notice.classList.add("visible");
+        }
+      }
+    }
   });
 }
 
