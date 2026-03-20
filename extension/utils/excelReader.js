@@ -1,5 +1,8 @@
 /**
- * Excel/CSV file reader and parser using SheetJS (XLSX global loaded from local lib/xlsx.full.min.js)
+ * Excel/CSV file reader and parser.
+ *
+ * CSV files are parsed with a built-in parser — no library required.
+ * Excel files (.xlsx / .xls) still use SheetJS (XLSX global from lib/xlsx.full.min.js).
  */
 import { parsePhoneNumber, deduplicateContacts } from "./parser.js";
 
@@ -87,6 +90,104 @@ function detectColumns(rows, hasHeaders) {
 }
 
 /**
+ * Process a 2-D array of rows into contacts + invalid arrays.
+ */
+function processRows(rows, defaultCountryCode) {
+  if (!rows || rows.length === 0) throw new Error("The file appears to be empty.");
+
+  const firstRow = rows[0];
+  const firstRowPhoneScore = firstRow.reduce((s, h) => s + phoneScore(h), 0);
+  const hasHeaders = firstRowPhoneScore > 0 || firstRow.some((h) => nameScore(h) > 0);
+
+  const { phoneCol, nameCol, dataStartRow } = detectColumns(rows, hasHeaders);
+
+  if (phoneCol === -1) throw new Error("Could not detect a phone number column.");
+
+  const contacts = [];
+  const invalid = [];
+
+  for (let i = dataStartRow; i < rows.length; i++) {
+    const row = rows[i];
+    const rawPhone = row[phoneCol];
+    const rawName = nameCol >= 0 ? row[nameCol] : "";
+
+    if (!rawPhone || String(rawPhone).trim() === "") continue;
+
+    const parsed = parsePhoneNumber(String(rawPhone), defaultCountryCode);
+    const name = rawName ? String(rawName).trim() : "";
+
+    if (parsed.valid) {
+      contacts.push({ name, phone: parsed.phone, status: "pending" });
+    } else {
+      invalid.push({ name, phone: String(rawPhone).trim(), reason: parsed.reason, row: i + 1 });
+    }
+  }
+
+  const { unique, duplicates } = deduplicateContacts(contacts);
+  const warnings = [];
+  if (duplicates.length > 0) {
+    warnings.push(`${duplicates.length} duplicate number(s) were removed.`);
+  }
+
+  return { contacts: unique, invalid, warnings };
+}
+
+// ── CSV parser (no library required) ─────────────────────────────────────────
+
+/**
+ * Parse a CSV/TSV text string into a 2-D array of strings.
+ * Handles quoted fields and embedded commas/double-quotes.
+ * Note: RFC 4180 multi-line quoted fields (newlines inside quotes) are not
+ * supported — phone-number CSV files never require this.
+ */
+function parseCsvText(text) {
+  const rows = [];
+  const lines = text.split(/\r?\n/);
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const fields = [];
+    let i = 0;
+
+    while (i < line.length) {
+      if (line[i] === '"') {
+        // Quoted field
+        i++;
+        let field = "";
+        while (i < line.length) {
+          if (line[i] === '"' && line[i + 1] === '"') {
+            field += '"';
+            i += 2;
+          } else if (line[i] === '"') {
+            i++;
+            break;
+          } else {
+            field += line[i++];
+          }
+        }
+        fields.push(field);
+        if (line[i] === ",") i++;
+      } else {
+        // Unquoted field
+        const end = line.indexOf(",", i);
+        if (end === -1) {
+          fields.push(line.slice(i).trim());
+          break;
+        }
+        fields.push(line.slice(i, end).trim());
+        i = end + 1;
+      }
+    }
+
+    rows.push(fields);
+  }
+
+  return rows;
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
  * Read an Excel or CSV file and extract contacts
  * @param {File} file
  * @param {string} defaultCountryCode
@@ -94,12 +195,34 @@ function detectColumns(rows, hasHeaders) {
  */
 export function readFile(file, defaultCountryCode = "91") {
   return new Promise((resolve, reject) => {
-    if (typeof XLSX === "undefined") {
-      reject(new Error("SheetJS (XLSX) library not loaded. Please ensure lib/xlsx.full.min.js is present (see lib/README.md)."));
+    const isCsv = /\.(csv|tsv|txt)$/i.test(file.name);
+
+    if (isCsv) {
+      // CSV: parse natively — no library needed
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const rows = parseCsvText(e.target.result || "");
+          resolve(processRows(rows, defaultCountryCode));
+        } catch (err) {
+          reject(new Error(`Failed to parse CSV: ${err.message}`));
+        }
+      };
+      reader.onerror = () => reject(new Error("Failed to read the file."));
+      reader.readAsText(file, "utf-8");
       return;
     }
 
-    const warnings = [];
+    // Excel formats require SheetJS
+    if (typeof XLSX === "undefined") {
+      reject(new Error(
+        "Excel import requires the SheetJS library. " +
+        "Please download xlsx.full.min.js and place it in the extension's lib/ folder " +
+        "(see lib/README.md). CSV files work without it."
+      ));
+      return;
+    }
+
     const reader = new FileReader();
 
     reader.onload = (e) => {
@@ -112,58 +235,17 @@ export function readFile(file, defaultCountryCode = "91") {
           return;
         }
 
+        const warnings = [];
         if (workbook.SheetNames.length > 1) {
           warnings.push(`Multiple sheets detected. Using first sheet: "${workbook.SheetNames[0]}".`);
         }
 
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        // Get data as array of arrays (raw values)
         const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
 
-        if (!rows || rows.length === 0) {
-          reject(new Error("The file appears to be empty."));
-          return;
-        }
-
-        // Determine if first row looks like a header row
-        const firstRow = rows[0];
-        const firstRowPhoneScore = firstRow.reduce((s, h) => s + phoneScore(h), 0);
-        const hasHeaders = firstRowPhoneScore > 0 || firstRow.some((h) => nameScore(h) > 0);
-
-        const { phoneCol, nameCol, dataStartRow } = detectColumns(rows, hasHeaders);
-
-        if (phoneCol === -1) {
-          reject(new Error("Could not detect a phone number column."));
-          return;
-        }
-
-        const contacts = [];
-        const invalid = [];
-
-        for (let i = dataStartRow; i < rows.length; i++) {
-          const row = rows[i];
-          const rawPhone = row[phoneCol];
-          const rawName = nameCol >= 0 ? row[nameCol] : "";
-
-          if (!rawPhone || String(rawPhone).trim() === "") continue;
-
-          const parsed = parsePhoneNumber(String(rawPhone), defaultCountryCode);
-          const name = rawName ? String(rawName).trim() : "";
-
-          if (parsed.valid) {
-            contacts.push({ name, phone: parsed.phone, status: "pending" });
-          } else {
-            invalid.push({ name, phone: String(rawPhone).trim(), reason: parsed.reason, row: i + 1 });
-          }
-        }
-
-        // Deduplicate
-        const { unique, duplicates } = deduplicateContacts(contacts);
-        if (duplicates.length > 0) {
-          warnings.push(`${duplicates.length} duplicate number(s) were removed.`);
-        }
-
-        resolve({ contacts: unique, invalid, warnings });
+        const result = processRows(rows, defaultCountryCode);
+        result.warnings = [...warnings, ...result.warnings];
+        resolve(result);
       } catch (err) {
         reject(new Error(`Failed to parse file: ${err.message}`));
       }
@@ -173,3 +255,5 @@ export function readFile(file, defaultCountryCode = "91") {
     reader.readAsArrayBuffer(file);
   });
 }
+
+

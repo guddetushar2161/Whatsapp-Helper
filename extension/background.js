@@ -19,11 +19,12 @@ let settings = {
 };
 
 let messageTemplate = "";
-let imageAttachment = null; // {name, type, size, dataUrl} | null
 let activeTabId = null;
 let processedSinceLastPause = 0;
 const MAX_WEB_OPEN_RETRIES = 2;
 let isQueueRunnerActive = false;
+const QUEUE_STORAGE_KEY = "wabm_queue";
+const SEND_TIMEOUT_MS = 25000;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,7 @@ function buildMessage(template, contact) {
 
 function broadcastStatus(extra = {}) {
   const progress = getProgress();
+  persistQueueState();
   chrome.runtime.sendMessage({
     type: "QUEUE_STATUS_UPDATE",
     ...progress,
@@ -74,6 +76,21 @@ function broadcastStatus(extra = {}) {
   }).catch(() => {
     // Popup may be closed — ignore
   });
+}
+
+function persistQueueState() {
+  // Save a snapshot so state survives service-worker restarts.
+  // Running queues are stored as "paused" so the user can see
+  // them and click Resume when the popup re-opens.
+  chrome.storage.local.set({
+    [QUEUE_STORAGE_KEY]: {
+      contacts: queue.contacts,
+      currentIndex: queue.currentIndex,
+      status: queue.status === "running" ? "paused" : queue.status,
+      messageTemplate,
+      settings,
+    },
+  }).catch(() => {});
 }
 
 function getProgress() {
@@ -147,7 +164,7 @@ async function selectQueueWhatsAppTab() {
   return activeTabId;
 }
 
-function waitForWhatsAppTabReady(tabId, timeoutMs = 30000) {
+function waitForWhatsAppTabReady(tabId, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     let done = false;
 
@@ -220,7 +237,7 @@ async function ensureWhatsAppWebTab(url) {
   }
 
   await chrome.tabs.update(activeTabId, { url, active: true });
-  await waitForWhatsAppTabReady(activeTabId, 30000);
+  await waitForWhatsAppTabReady(activeTabId, 20000);
   return activeTabId;
 }
 
@@ -232,7 +249,7 @@ async function openWhatsAppWebTabWithRetry(url, maxRetries = MAX_WEB_OPEN_RETRIE
     } catch (err) {
       lastError = err;
       if (attempt < maxRetries) {
-        await sleep(1200);
+        await sleep(500);
       }
     }
   }
@@ -243,18 +260,14 @@ async function openWhatsAppWebTabWithRetry(url, maxRetries = MAX_WEB_OPEN_RETRIE
 
 async function sendToContact(contact) {
   const message = buildMessage(messageTemplate, contact);
-  const hasImage = !!(imageAttachment && imageAttachment.dataUrl);
   const phone = contact.phone.replace(/^\+/, "");
   const params = new URLSearchParams({
     phone,
     type: "phone_number",
     app_absent: "1",
+    text: message,
   });
-  if (!hasImage) {
-    params.set("text", message);
-  }
   const url = `https://web.whatsapp.com/send?${params.toString()}`;
-  const SEND_TIMEOUT_MS = hasImage ? 60000 : 30000;
 
   try {
     await openWhatsAppWebTabWithRetry(url);
@@ -298,9 +311,8 @@ async function sendToContact(contact) {
     chrome.runtime.onMessage.addListener(onMessage);
 
     triggerSendAction(activeTabId, {
-      mode: hasImage ? "IMAGE_THEN_TEXT" : "TEXT_ONLY",
+      mode: "TEXT_ONLY",
       messageText: message,
-      imageAttachment: hasImage ? imageAttachment : null,
     }).catch((err) => {
       if (settled) return;
       settled = true;
@@ -426,7 +438,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           queue.currentIndex = 0;
           queue.status = "running";
           messageTemplate = message.messageTemplate || "";
-          imageAttachment = message.imageAttachment || null;
           settings = normalizeSettings(message);
           processedSinceLastPause = 0;
           broadcastStatus();
@@ -463,6 +474,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case "STOP_QUEUE": {
       queue.status = "stopped";
+      // Mark remaining pending as skipped immediately
+      queue.contacts.forEach((c) => {
+        if (c.status === "pending" || c.status === "sending") c.status = "skipped";
+      });
       broadcastStatus();
       sendResponse({ ok: true });
       break;
@@ -481,3 +496,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Return true to keep the message channel open for async sendResponse if needed
   return true;
 });
+
+// ── Startup: restore persisted queue state ────────────────────────────────────
+
+(async () => {
+  try {
+    const result = await chrome.storage.local.get(QUEUE_STORAGE_KEY);
+    const saved = result[QUEUE_STORAGE_KEY];
+    if (saved && Array.isArray(saved.contacts) && saved.contacts.length > 0) {
+      queue.contacts = saved.contacts;
+      queue.currentIndex = saved.currentIndex || 0;
+      // Restore as paused so the user reviews and clicks Resume.
+      // Never auto-resume "running" — the WhatsApp tab URL may have changed.
+      queue.status = (saved.status === "paused") ? "paused" : (saved.status || "idle");
+      messageTemplate = saved.messageTemplate || "";
+      if (saved.settings) {
+        settings = normalizeSettings(saved.settings);
+      }
+    }
+  } catch (_) {
+    // Ignore storage errors on startup
+  }
+})();
